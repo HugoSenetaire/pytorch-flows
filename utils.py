@@ -1,58 +1,87 @@
-import os
-
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import torchvision
+import torch.nn as nn
+
+# from .datasets import *
+from .flows import (
+    MADE,
+    BatchNormFlow,
+    CouplingLayer,
+    InvertibleMM,
+    LUInvertibleMM,
+    MADESplit,
+    Reverse,
+    FlowSequential,
+)
 
 
-def save_moons_plot(epoch, best_model, dataset):
-    # generate some examples
-    best_model.eval()
-    with torch.no_grad():
-        x_synth = best_model.sample(500).detach().cpu().numpy()
+def get_flow(
+    flow_name, num_inputs, num_hidden, num_cond_inputs, num_blocks, act="relu",
+):
+    modules = []
+    assert flow_name in ["maf", "maf-split", "maf-split-glow", "realnvp", "glow"]
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    if flow_name == "glow":
+        mask = torch.arange(0, num_inputs) % 2
+        mask = mask.to(device).float()
 
-    fig = plt.figure()
+        print("Warning: Results for GLOW are not as good as for MAF yet.")
+        for _ in range(num_blocks):
+            modules += [
+                BatchNormFlow(num_inputs),
+                LUInvertibleMM(num_inputs),
+                CouplingLayer(
+                    num_inputs,
+                    num_hidden,
+                    mask,
+                    num_cond_inputs,
+                    s_act="tanh",
+                    t_act="relu",
+                ),
+            ]
+            mask = 1 - mask
+    elif flow_name == "realnvp":
+        mask = torch.arange(0, num_inputs) % 2
+        mask = mask.to(device).float()
 
-    ax = fig.add_subplot(121)
-    ax.plot(dataset.val.x[:, 0], dataset.val.x[:, 1], '.')
-    ax.set_title('Real data')
-
-    ax = fig.add_subplot(122)
-    ax.plot(x_synth[:, 0], x_synth[:, 1], '.')
-    ax.set_title('Synth data')
-
-    try:
-        os.makedirs('plots')
-    except OSError:
-        pass
-
-    plt.savefig('plots/plot_{:03d}.png'.format(epoch))
-    plt.close()
-
-
-batch_size = 100
-fixed_noise = torch.Tensor(batch_size, 28 * 28).normal_()
-y = torch.arange(batch_size).unsqueeze(-1) % 10
-y_onehot = torch.FloatTensor(batch_size, 10)
-y_onehot.zero_()
-y_onehot.scatter_(1, y, 1)
-
-
-def save_images(epoch, best_model, cond):
-    best_model.eval()
-    with torch.no_grad():
-        if cond:
-            imgs = best_model.sample(batch_size, noise=fixed_noise, cond_inputs=y_onehot).detach().cpu()
-        else:
-            imgs = best_model.sample(batch_size, noise=fixed_noise).detach().cpu()
-
-        imgs = torch.sigmoid(imgs.view(batch_size, 1, 28, 28))
-    
-    try:
-        os.makedirs('images')
-    except OSError:
-        pass
-
-    torchvision.utils.save_image(imgs, 'images/img_{:03d}.png'.format(epoch), nrow=10)
-
+        for _ in range(num_blocks):
+            modules += [
+                CouplingLayer(
+                    num_inputs,
+                    num_hidden,
+                    mask,
+                    num_cond_inputs,
+                    s_act="tanh",
+                    t_act="relu",
+                ),
+                BatchNormFlow(num_inputs),
+            ]
+            mask = 1 - mask
+    elif flow_name == "maf":
+        for _ in range(num_blocks):
+            modules += [
+                MADE(num_inputs, num_hidden, num_cond_inputs, act=act),
+                BatchNormFlow(num_inputs),
+                Reverse(num_inputs),
+            ]
+    elif flow_name == "maf-split":
+        for _ in range(num_blocks):
+            modules += [
+                MADESplit(
+                    num_inputs, num_hidden, num_cond_inputs, s_act="tanh", t_act="relu"
+                ),
+                BatchNormFlow(num_inputs),
+                Reverse(num_inputs),
+            ]
+    elif flow_name == "maf-split-glow":
+        for _ in range(num_blocks):
+            modules += [
+                MADESplit(
+                    num_inputs, num_hidden, num_cond_inputs, s_act="tanh", t_act="relu"
+                ),
+                BatchNormFlow(num_inputs),
+                InvertibleMM(num_inputs),
+            ]
+    return modules
